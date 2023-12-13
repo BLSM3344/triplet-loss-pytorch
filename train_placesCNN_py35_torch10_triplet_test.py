@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import argparse
 import os
+import timm
 import shutil
 import time
 import torch
@@ -29,10 +30,11 @@ model_names = sorted(name for name in models.__dict__
                      and callable(models.__dict__[name]))
 
 # 存放数据的根目录
-DATA_PATH = '/home/meteo/zihao.chen/data'
+DATA_PATH = r'D:\LabFile\code\pretrained-cl\data\CIFAR-100-dataset-main'
 
 # 数据集的目录，它内部应该满足pytorch Dataset的标准，形如 data/class1/*.jpg data/class2/*.jpg data/class3/*.jpg
-data_path = os.path.join(DATA_PATH, 'allergy/allergy_work')
+# data_path = os.path.join(DATA_PATH, 'allergy/allergy_work')
+data_path = DATA_PATH
 
 # 最优迭代的索引，初始为0
 best_prec1 = 0
@@ -45,10 +47,10 @@ arch = 'resnet50_allergy_336_lr0001_triplet_base'
 resume = None
 
 # 模型的分类类别数量
-num_classes = 10
+num_classes = 100
 
 # 每批次训练的样本量，也会影响dataloader的缓冲大小
-batch_size = 10
+batch_size = 32
 
 # dataloader 使用的线程数量，之所以没用进程的方式，是因为主要是大多数数据装载的时间主要集中在IO阻塞上，
 # 数据的预处理本身占用的时间其实很快。而且进程间通讯和调度没有线程那么方便。
@@ -84,6 +86,24 @@ def _cloud_crop(img):
         return img.crop((lw, 0, w - lw, h - lh))
     return img
 
+class myNet(nn.Module):
+    def __init__(self):
+        super(myNet, self).__init__()
+        self.vit = timm.create_model("vit_base_patch16_224_in21k", pretrained=True).cuda()
+        for param in self.vit.parameters():
+            param.requires_grad = False
+
+        self.fc = nn.Linear(21843, 2048)
+        self.fc2 = nn.Linear(2048, 512)
+
+    def forward(self, x):
+        # 使用预训练模型进行特征提取
+        x = self.vit(x)
+        # 将输出展平并传递给全连接层
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        x = self.fc2(x)
+        return x
 
 def main():
     global best_prec1
@@ -91,35 +111,16 @@ def main():
 
     # create model
     print("=> creating model '{}'".format(arch))
-    if arch.lower().startswith('resnet'):
-        # a customized resnet model with last feature map size as 14x14 for better class activation mapping
-        model = wideresnet.resnet50(pretrained=True, num_classes=1000)
-        # print (model)
-        model.avgpool = nn.AdaptiveAvgPool2d(1)
-        model.fc = nn.Linear(2048, 256)
-        model.classifier = nn.Linear(256, num_classes)
-        # print (model.fc)
-    elif arch.lower().startswith('bcnn'):
-        model = BilinearCNN.BilinearCNN(num_classes)
-    elif arch.lower().startswith('inception'):
-        # model = inceptionv3.inception_v3(pretrained=True)
-        model = inceptionv3.inception_v3(pretrained=True)
-        model.fc = nn.Linear(2048, num_classes)
-    elif arch.lower().startswith('zrmodel'):
-        model = LeNet32(1)
-    else:
-        model = models.__dict__[arch](num_classes=365)
-        state_dict = torch.load('whole_alexnet_places365_python36.pth')
-        model.load_state_dict(state_dict)
-        model.classifier = nn.Sequential(
-            nn.Dropout(),
-            nn.Linear(256 * 6 * 6, 4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, num_classes),
-        )
+    model = myNet()
+    model.classifier = nn.Sequential(
+        nn.Dropout(),
+        nn.Linear(512, 1024),
+        nn.ReLU(inplace=True),
+        nn.Dropout(),
+        nn.Linear(1024, 512),
+        nn.ReLU(inplace=True),
+        nn.Linear(512, num_classes),
+    )
 
     # a customized resnet model with last feature map size as 14x14 for better class activation mapping
 
@@ -147,7 +148,7 @@ def main():
 
     # Data loading code
     traindir = os.path.join(data_path, 'train')
-    valdir = os.path.join(data_path, 'val')
+    valdir = os.path.join(data_path, 'test')
     # normalize = transforms.Normalize(mean=[0.1680733,0.1680733,0.1680733],
     #                                  std=[0.15840427,0.15840427,0.15840427])
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -168,10 +169,10 @@ def main():
 
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(384),
-            transforms.CenterCrop(334),
+            transforms.Resize(224),
+            # transforms.CenterCrop(334),
             transforms.ToTensor(),
-            normalize,
+            # normalize,
         ])),
         batch_size=batch_size, shuffle=True,
         num_workers=data_loader_workers, pin_memory=True)
@@ -200,12 +201,12 @@ def main():
                                   transforms=transforms.Compose([
                                       # transforms.Lambda(lambda img:_cloud_crop(img)),
                                       # transforms.RandomResizedCrop(336, scale=(0.8, 1.0)),
-                                      transforms.RandomResizedCrop(336),
+                                      transforms.RandomResizedCrop(224),
                                       # transforms.CenterCrop(336),
-                                      transforms.RandomHorizontalFlip(),
+                                      # transforms.RandomHorizontalFlip(),
                                       # transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
                                       transforms.ToTensor(),
-                                      normalize,
+                                      # normalize,
                                   ]), shuffle=True)
         # train for one epoch
         train(train_loader, model, criterion_tml, criterion_cel, optimizer, epoch)
@@ -296,6 +297,7 @@ def train(train_loader, model, criterion1, criterion2, optimizer, epoch):
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                 epoch, i, train_loader_length // batch_size, batch_time=batch_time,
                 data_time=data_time, loss=losses, top1=top1, top5=top5))
+            print("loss1:", loss1.item(), "loss2: ", loss2.item())
 
 
 def validate(val_loader, model, criterion): # modedl是完整的模型，不是特征提取器，criterion是交叉熵损失函数

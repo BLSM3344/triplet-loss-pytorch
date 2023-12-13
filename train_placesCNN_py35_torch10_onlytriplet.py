@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import argparse
 import os
+import timm
 import shutil
 import time
 import torch
@@ -14,6 +15,10 @@ from collections import OrderedDict
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from PIL import Image
+from torchvision import utils
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 from PIL import ImageFile
 # ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -29,10 +34,11 @@ model_names = sorted(name for name in models.__dict__
                      and callable(models.__dict__[name]))
 
 # 存放数据的根目录
-DATA_PATH = '/home/meteo/zihao.chen/data'
+DATA_PATH = r'D:\LabFile\code\pretrained-cl\data\CIFAR-100-dataset-main'
 
 # 数据集的目录，它内部应该满足pytorch Dataset的标准，形如 data/class1/*.jpg data/class2/*.jpg data/class3/*.jpg
-data_path = os.path.join(DATA_PATH, 'allergy/allergy_work')
+# data_path = os.path.join(DATA_PATH, 'allergy/allergy_work')
+data_path = DATA_PATH
 
 # 最优迭代的索引，初始为0
 best_prec1 = 0
@@ -45,14 +51,14 @@ arch = 'resnet50_allergy_336_lr0001_triplet_base'
 resume = None
 
 # 模型的分类类别数量
-num_classes = 10
+num_classes = 100
 
 # 每批次训练的样本量，也会影响dataloader的缓冲大小
-batch_size = 10
+batch_size = 16
 
 # dataloader 使用的线程数量，之所以没用进程的方式，是因为主要是大多数数据装载的时间主要集中在IO阻塞上，
 # 数据的预处理本身占用的时间其实很快。而且进程间通讯和调度没有线程那么方便。
-data_loader_workers = 8
+data_loader_workers = 1
 
 # 是否是用来执行评价过程的,看代码，很简单
 evaluate = False
@@ -85,41 +91,44 @@ def _cloud_crop(img):
     return img
 
 
+class myNet(nn.Module):
+    def __init__(self):
+        super(myNet, self).__init__()
+        self.vit = timm.create_model("vit_base_patch16_224_in21k", pretrained=True).cuda()
+        for param in self.vit.parameters():
+            param.requires_grad = False
+
+        self.fc1 = nn.Linear(21843, 4096)
+        self.fc2 = nn.Linear(4096, 2048)
+        self.fc3 = nn.Linear(2048, 512)
+
+    def forward(self, x):
+        # 使用预训练模型进行特征提取
+        x = self.vit(x)
+        # 将输出展平并传递给全连接层
+        x = x.view(x.size(0), -1)
+        x = self.fc1(x)
+        x = nn.functional.relu(x)  # 添加 ReLU 激活函数
+        x = self.fc2(x)
+        x = nn.functional.relu(x)  # 添加 ReLU 激活函数
+        x = self.fc3(x)
+        return x
+
+
 def main():
     global best_prec1
     global start_epoch
 
     # create model
     print("=> creating model '{}'".format(arch))
-    if arch.lower().startswith('resnet'):
-        # a customized resnet model with last feature map size as 14x14 for better class activation mapping
-        model = wideresnet.resnet50(pretrained=True, num_classes=1000)
-        # print (model)
-        model.avgpool = nn.AdaptiveAvgPool2d(1)
-        model.fc = nn.Linear(2048, 256)
-        model.classifier = nn.Linear(256, num_classes)
-        # print (model.fc)
-    elif arch.lower().startswith('bcnn'):
-        model = BilinearCNN.BilinearCNN(num_classes)
-    elif arch.lower().startswith('inception'):
-        # model = inceptionv3.inception_v3(pretrained=True)
-        model = inceptionv3.inception_v3(pretrained=True)
-        model.fc = nn.Linear(2048, num_classes)
-    elif arch.lower().startswith('zrmodel'):
-        model = LeNet32(1)
-    else:
-        model = models.__dict__[arch](num_classes=365)
-        state_dict = torch.load('whole_alexnet_places365_python36.pth')
-        model.load_state_dict(state_dict)
-        model.classifier = nn.Sequential(
-            nn.Dropout(),
-            nn.Linear(256 * 6 * 6, 4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, num_classes),
-        )
+    model = myNet()
+    model.classifier = nn.Sequential(
+        nn.Linear(512, 1024),
+        nn.ReLU(inplace=True),
+        nn.Linear(1024, 512),
+        nn.ReLU(inplace=True),
+        nn.Linear(512, num_classes),
+    )
 
     # a customized resnet model with last feature map size as 14x14 for better class activation mapping
 
@@ -128,7 +137,7 @@ def main():
     model = model.cuda()
     # model = nn.DataParallel(model, device_ids=[9])
     # model = torch.nn.DataParallel(model).cuda()
-    print (model)
+    print(model)
 
     # optionally resume from a checkpoint
     if resume:
@@ -147,7 +156,7 @@ def main():
 
     # Data loading code
     traindir = os.path.join(data_path, 'train')
-    valdir = os.path.join(data_path, 'val')
+    valdir = os.path.join(data_path, 'test')
     # normalize = transforms.Normalize(mean=[0.1680733,0.1680733,0.1680733],
     #                                  std=[0.15840427,0.15840427,0.15840427])
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -168,23 +177,26 @@ def main():
 
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(384),
-            transforms.CenterCrop(334),
+            transforms.Resize(224),
+            # transforms.CenterCrop(334),
             transforms.ToTensor(),
-            normalize,
+            # normalize,
         ])),
         batch_size=batch_size, shuffle=True,
         num_workers=data_loader_workers, pin_memory=True)
 
     # define loss function (criterion) and pptimizer
     criterion_cel = nn.CrossEntropyLoss().cuda()
-    criterion_tml = nn.TripletMarginLoss(margin=1.0, p=2).cuda()
+    criterion_tml = nn.TripletMarginLoss(margin=2.0, p=2).cuda()
     # optimizer = torch.optim.SGD(model.parameters(), lr,
     #                             momentum=momentum,
     #                             weight_decay=weight_decay)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0,
-                                 amsgrad=False)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0,
+    #                              amsgrad=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr,
+                                momentum=momentum,
+                                weight_decay=weight_decay)
     # optimizer = torch.optim.SGD([
     #             {'params': model.features.parameters()},
     #             {'params': model.classifier.parameters(), 'lr': lr}
@@ -200,12 +212,12 @@ def main():
                                   transforms=transforms.Compose([
                                       # transforms.Lambda(lambda img:_cloud_crop(img)),
                                       # transforms.RandomResizedCrop(336, scale=(0.8, 1.0)),
-                                      transforms.RandomResizedCrop(336),
+                                      transforms.Resize(224),
                                       # transforms.CenterCrop(336),
-                                      transforms.RandomHorizontalFlip(),
+                                      # transforms.RandomHorizontalFlip(),
                                       # transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
                                       transforms.ToTensor(),
-                                      normalize,
+                                      # normalize,
                                   ]), shuffle=True)
         # train for one epoch
         train(train_loader, model, criterion_tml, criterion_cel, optimizer, epoch)
@@ -222,6 +234,7 @@ def main():
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
         }, is_best, epoch, arch.lower())
+
 
 # criterion1是三元组损失函数，用来训练特征层。criterion2是交叉熵损失函数，用来训练分类层
 def train(train_loader, model, criterion1, criterion2, optimizer, epoch):
@@ -242,6 +255,17 @@ def train(train_loader, model, criterion1, criterion2, optimizer, epoch):
         # measure data loading time
         data_time.update(time.time() - end)
 
+        # 测试代码
+        # 假设 input 是一个形状为 (batch_size, 3, H, W) 的张量
+        # sample_input = torch.stack(input[1])
+        # grid = utils.make_grid([matrix * 255 for matrix in input[0]])
+        # print(target[0][0], " ", target[0][1], " ", target[0][2])
+        # 将 grid 转换为 PIL 图像
+        # image = grid.permute(1, 2, 0).numpy().astype('uint8')
+        # pil_image = Image.fromarray(image)
+        # 显示 PIL 图像
+        # pil_image.show()
+
         temp_x = [torch.stack(input[i], dim=0) for i in range(len(input))]
         temp_y = [torch.stack(target[i], dim=0) for i in range(len(target))]
         new_x = torch.stack(temp_x, dim=0)
@@ -257,9 +281,19 @@ def train(train_loader, model, criterion1, criterion2, optimizer, epoch):
         # print (sample_target[-batch_size:])
         target = sample_target.cuda()
 
+        # 测试代码
+        # 假设 input 是一个形状为 (batch_size, 3, H, W) 的张量
+        # grid = utils.make_grid([matrix * 255 for matrix in sample_input[0:3]])
+        # print(target[0], " ", target[1], " ", target[2],target[3], " ", target[4], " ", target[5],target[6], " ", target[7], " ", target[8])
+        # # 将 grid 转换为 PIL 图像
+        # image = grid.permute(1, 2, 0).numpy().astype('uint8')
+        # pil_image = Image.fromarray(image)
+        # # 显示 PIL 图像
+        # pil_image.show()
+
         # input的形式是三元输入
-        input_var = torch.autograd.Variable(sample_input.cuda())
-        target_var = torch.autograd.Variable(target.cuda())
+        input_var = sample_input.cuda()
+        target_var = target.cuda()
 
         # compute output
         output = model(input_var)
@@ -296,9 +330,10 @@ def train(train_loader, model, criterion1, criterion2, optimizer, epoch):
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                 epoch, i, train_loader_length // batch_size, batch_time=batch_time,
                 data_time=data_time, loss=losses, top1=top1, top5=top5))
+            print("loss1:", loss1.item(), " ", "loss2:", loss2.item())
 
 
-def validate(val_loader, model, criterion): # modedl是完整的模型，不是特征提取器，criterion是交叉熵损失函数
+def validate(val_loader, model, criterion):  # modedl是完整的模型，不是特征提取器，criterion是交叉熵损失函数
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()

@@ -67,6 +67,8 @@ class DataLoader(object):
             lable_path = os.path.join(self.work_path, lable)
             if not os.path.isdir(lable_path):
                 continue
+            # 为lable_package在当前类别创建一个子字典，key为图像名字，value为下面的sample
+            # sample = [图像路径，图像类别]
             self.lable_package[self.lables_map[lable]] = {}
             lable_imgs = os.listdir(lable_path)
             lable_imgs.sort()
@@ -125,6 +127,7 @@ class DataLoader(object):
     def __len__(self):
         return len(self.triplet_db)
 
+    # 创建三元组数据集
     def create_triplet_db(self):
         self.triplet_db = []
         anchor_db = copy.deepcopy(self.lable_package)
@@ -268,7 +271,7 @@ if __name__ == '__main__':
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     transform = transforms.Compose([
-        transforms.RandomSizedCrop(224),
+        transforms.RandomResizedCrop(224),
         # transforms.CenterCrop(15),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
@@ -282,7 +285,7 @@ if __name__ == '__main__':
 
         print ('=' * 20)
         train_loader = DataLoader(root_path='/home/meteo/zihao.chen/data/HBQ/Cloud_357/class_label_B4/3_work/train',
-                                  batch_size=batch_size, num_workers=8, transforms=transform)
+                                  batch_size=batch_size, num_workers=0, transforms=transform)
         for i, sample in enumerate(train_loader):
             try:
                 print ('load data %d' % (i))
@@ -299,7 +302,7 @@ if __name__ == '__main__':
                 sample_input = torch.cat(new_x, 0)
                 sample_target = torch.cat(new_y, 0)
 
-                target = sample_target.cuda(async=True)
+                target = sample_target.cuda()
                 input_var = torch.autograd.Variable(sample_input)
                 target_var = torch.autograd.Variable(target)
                 # compute output
